@@ -1,143 +1,408 @@
-# Mike Brandin CPSC 3600 Section 91005 10/31/2021
+# Name: Joel Miller        
+# Username: jmill53            
+# Email: jmill53@clemson.edu
+# Instructor: Dr. Andrew Robb       
+# CPSC 3600 Summer 23             
+# Project: Implementing a Reliable Data Transport Protocol  
 
-from network_simulator import NetworkSimulator, Packet, EventEntity
+
+from network_simulator import NetworkSimulator, EventEntity
 from enum import Enum
-from struct import pack, unpack, unpack_from
+from struct import pack, unpack, calcsize
+
+# We're importing the struct module below so we have access to the struct.error exception. We also import pack and 
+# unpack above using from... import... for the convenience of writing pack() instead of struct.pack() 
+import struct 
+
+MAX_UNSIGNED_INT = 4294967295
 
 class GBNHost():
 
-    # The __init__ method accepts:
-    # - a reference to the simulator object
-    # - the value for this entity (EntityType.A or EntityType.B)
-    # - the interval for this entity's timer
-    # - the size of the window used for the Go-Back-N algorithm
     def __init__(self, simulator, entity, timer_interval, window_size):
+        """ Initializes important values for GBNHost objects
         
-        # These are important state values that you will need to use in your code
+        In addition to storing the passed in values, the values indicated in the initialization transition for the 
+        GBN Sender and GBN Receiver finite state machines also need to be initialized. This has been done for you.
+        
+        Args:
+            simulator (NetworkSimulator): contains a reference to the network simulator that will be used to communicate
+                with other instances of GBNHost. You'll need to call four methods from the simulator: 
+                pass_to_application_layer, pass_to_network_layer, start_timer, and stop_timer.
+            entity (EventEntity): contains a value representing which entity this is. You'll need this when calling 
+                any of functions in the simulator (the available functions are specified above).
+            timer_interval (float): the amount of time that should pass before a timer expires
+            window_size (int): the size of the window being used by this GBNHost
+        Returns:
+            nothing        
+        """
+        
+        # These variables are relevant to the functionality defined in both the GBN Sender and Receiver FSMs
         self.simulator = simulator
         self.entity = entity
+        self.window_size = window_size
         
-        self.unACKed_buffer = {}
-        self.app_layer_buffer = [] 
-
-        self.last_ack = self.make_ACKpkt(-1)
-
-        # Sender properties
-        self.timer_interval = timer_interval        # The duration the timer lasts before triggering
-        self.window_size = window_size              # The size of the seq/ack window
-        self.window_base = 0                        # The last ACKed packet. This starts at 0 because no packets 
-                                                    # have been ACKed
-        self.next_seq_num = 0                       # The SEQ number that will be used next
+        # The variables are relevant to the GBN Sender FSM
+        self.timer_interval = timer_interval 
+        self.window_base = 0
+        self.next_seq_num = 0
+        self.unacked_buffer = [None] * window_size  # Creates a list of length self.window_size filled with None values
+        self.app_layer_buffer = []
+        
+        # These variables are relevant to the GBN Receiver FSM
         self.expected_seq_num = 0
-
-
-    ###########################################################################################################
-    ## Core Interface functions that are called by Simulator
-
-    # This function implements the SENDING functionality. It should implement retransmit-on-timeout. 
-    # Refer to the GBN sender flowchart for details about how this function should be implemented
-    def receive_from_application_layer(self, payload):
-        if (self.next_seq_num < (self.window_base + self.window_size)):
-            self.unACKed_buffer[self.next_seq_num] = self.make_DATApkt(self.next_seq_num, payload)
-            self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
-            if (self.window_base == self.next_seq_num):
-                self.simulator.start_timer(self.entity, self.timer_interval)
-            self.next_seq_num += 1
-        else:
-            self.app_layer_buffer.append(payload)
-
-
-    # This function implements the RECEIVING functionality. This function will be more complex that
-    # receive_from_application_layer(), it includes functionality from both the GBN Sender and GBN receiver
-    # FSM's (both of these have events that trigger on receive_from_network_layer). You will need to handle 
-    # data differently depending on if it is a packet containing data, or if it is an ACK.
-    # Refer to the GBN receiver flowchart for details about how to implement responding to data pkts, and
-    # refer to the GBN sender flowchart for details about how to implement responidng to ACKs
-    def receive_from_network_layer(self, byte_data):
-        try:
-            header = unpack("!HiHI", byte_data[:12])
-        except:
-            self.simulator.pass_to_network_layer(self.entity, self.last_ack, True)
-            return
-        if (self.is_corrupt(byte_data)):
-            self.simulator.pass_to_network_layer(self.entity, self.last_ack, True)
-            return    
-        elif (header[0] == 0): #received ack # not corrupt
-            ack_num = header[1]
-            if ack_num >= self.window_base:
-
-                if self.window_base < ack_num:
-                    i = self.window_base
-                    while i <= ack_num and i in self.unACKed_buffer:
-                        del self.unACKed_buffer[i]
-                        i += 1
-
-                self.window_base = ack_num + 1
-                self.simulator.stop_timer(self.entity)
-
-                if (self.window_base != self.next_seq_num):
-                    self.simulator.start_timer(self.entity, self.timer_interval)
-                while (len(self.app_layer_buffer) > 0 and self.next_seq_num < (self.window_base + self.window_size)):
-                    payload = self.app_layer_buffer.pop()
-                    self.unACKed_buffer[self.next_seq_num] = self.make_DATApkt(self.next_seq_num, payload)
-                    self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
-                    if (self.window_base == self.next_seq_num):
-                        self.simulator.start_timer(self.entity, self.timer_interval)
-                    self.next_seq_num += 1
-        else: #received data
-            if (self.expected_seq_num == header[1]):
-                if header[3] > 0:
-                    try:
-                        data = unpack("!%is"%header[3], byte_data[12:])[0].decode()
-                    except:
-                        self.simulator.pass_to_network_layer(self.entity, self.last_ack, True)
-                        return
-                self.simulator.pass_to_application_layer(self.entity, data)
-                self.last_ack = self.make_ACKpkt(self.expected_seq_num)
-                self.simulator.pass_to_network_layer(self.entity, self.last_ack, True)
-                self.expected_seq_num += 1
-            else:
-                self.simulator.pass_to_network_layer(self.entity, self.last_ack, True)
-
-    # This function is called by the simulator when a timer interrupt is triggered due to an ACK not being 
-    # received in the expected time frame. All unACKHiHIed data should be resent, and the timer restarted
-    def timer_interrupt(self):
-        self.simulator.start_timer(self.entity, self.timer_interval) 
-        for j in range(self.window_base, self.next_seq_num):
-            self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[j], False)
-    # This function should check to determine if a given packet is corrupt. The packet parameter accepted
-    # by this function should contain a byte array
-    def is_corrupt(self, packet):
-        if (self.compute_checksum(packet) == 0x0000):
-            return False
-        else:
-            return True
-
-    def compute_checksum(self, packet):
-        if len (packet) % 2 == 1:
-            packet = packet + bytes(1)
+        self.last_ack_pkt = self.create_ack_pkt(MAX_UNSIGNED_INT)
         
-        summed_words = 0
-        for i in range (0 , len(packet), 2) :
-            word = packet [i] << 8 | packet [i+1]
-            summed_words += word
-            summed_words = (summed_words & 0xffff) + (summed_words >> 16)
+        
+    def receive_from_application_layer(self, payload):
+        """ Implements the functionality required to send packets received from simulated applications via the network 
+            simualtor.
+            
+        This function will be called by the NetworkSimualtor when simulated data needs to be sent across the 
+        network. It should implement all SENDING functionality from the GBN Sender FSM. Refer to the FSM for 
+        implementation details.
+            
+        You'll need to call self.simulator.pass_to_network_layer(), self.simulator.start_timer(), and 
+        self.simulator.stop_timer() in this function. Make sure you pass self.entity as the first argument when 
+        calling any of these functions.
+            
+        Args:
+            payload (string): the payload provided by a simulated application that needs to be sent
+        Returns:
+            nothing        
+        """
+        
+        # Check if there is space in the window to send a new packet
+        if self.next_seq_num < self.window_base + self.window_size :
+            # Create and store the data packet in the unacked_buffer
+            self.unacked_buffer[self.next_seq_num % self.window_size] = \
+            self.create_data_pkt(self.next_seq_num, payload)
+            # Send the packet to the network layer
+            self.simulator.pass_to_network_layer(self.entity, 
+                                                 self.unacked_buffer
+                                                 [self.next_seq_num % 
+                                                  self.window_size])
+            
+            # If the window base is equal to the next sequence number, start the timer
+            if self.window_base == self.next_seq_num :
+                self.simulator.start_timer(self.entity, self.timer_interval)
+            # Update the expected sequence number
+            self.next_seq_num += 1
+        
+        # If there is no space in the window, buffer the payload
+        else :
+            self.app_layer_buffer.append(payload)
+    
+    
+    def receive_from_network_layer(self, packet):
+        """ Implements the functionality required to receive packets received from simulated applications via the 
+            network simualtor.
+            
+        This function will be called by the NetworkSimualtor when simulated packets are ready to be received from 
+        the network. It should implement all RECEIVING functionality from the GBN Sender and GBN Receiver FSMs. 
+        Refer to both FSMs for implementation details.
+            
+        Note that this is a more complex function to implement than receive_from_application_layer as it will 
+        involve handling received data packets and acknowledgment packets separately. The logic for handling 
+        received data packets is detailed in the GBN Receiver FSM and the logic for handling received acknowledgment 
+        packets is detailed in the GBN Sender FSM.
+        
+        You'll need to call self.simulator.pass_to_application_layer() and self.simulator.pass_to_network_layer(), 
+        in this function. Make sure you pass self.entity as the first argument when calling any of these functions.
+        
+        HINT: Remember that your default ACK message has a sequence number that is one less than 0, which turns into 
+              4294967295 as it's unsigned int. When you check to make sure that the seq_num of an ACK message is 
+              >= window_base you'll also want to make sure it is not 4294967295 since you won't want to update your 
+              window_base value from that first default ack.
+        
+        Args:
+            packet (bytes): the bytes object containing the packet data
+        Returns:
+            nothing        
+        """
+        
+        # Check if the packet is corrupt
+        if self.is_corrupt(packet) :
+            # Send the last acknowledgment packet again
+            self.simulator.pass_to_network_layer(self.entity, self.last_ack_pkt)
+            return
+        try:
+            # Unpack the packet contents
+            packet_contents = self.unpack_pkt(packet)
+        except Exception:
+            # Send the last acknowledgment packet again
+            self.simulator.pass_to_network_layer(self.entity, self.last_ack_pkt)
+            return
+        else :
+           
+            if packet_contents['packet_type'] == 0x1 :
+            	# Received an acknowledgment packet
+                ack_num = packet_contents['seq_num']
+                
+                # Update the window base and stop the timer
+                if (ack_num != MAX_UNSIGNED_INT) and (self.window_base <= ack_num):
+                    self.window_base = ack_num + 1
+                    self.simulator.stop_timer(self.entity)
+                    # If there are more packets in the buffer, start the timer again
+                    if (self.window_base != self.next_seq_num) :
+                        self.simulator.start_timer(self.entity, self.timer_interval)
+                    # Send any buffered payloads within the window
+                    while len(self.app_layer_buffer) > 0 and self.next_seq_num < \
+                    (self.window_base + self.window_size) :
+                        payload = self.app_layer_buffer.pop(0)
+                        self.unacked_buffer[self.next_seq_num %self.window_size] = \
+                        self.create_data_pkt(self.next_seq_num, payload)
+                        self.simulator.pass_to_network_layer(self.entity, 
+                                                             self.unacked_buffer
+                                                             [self.next_seq_num % 
+                                                              self.window_size])
+                        if self.window_base == self.next_seq_num :
+                            self.simulator.start_timer(self.entity, 
+                                                       self.timer_interval)  
+                        self.next_seq_num += 1                               
+            elif packet_contents['packet_type'] == 0x0:
+                # Received a data packet
+                seq_num = packet_contents['seq_num']
+                
+                if seq_num == self.expected_seq_num :
+                	# Pass the payload to the application layer
+                    self.simulator.pass_to_application_layer(self.entity, 
+                                                             packet_contents['payload'])
+                    # Create and send the acknowledgment packet
+                    self.last_ack_pkt = self.create_ack_pkt(self.expected_seq_num)
+                    self.simulator.pass_to_network_layer(self.entity, 
+                                                         self.last_ack_pkt)
+                    # Update the expected sequence number
+                    self.expected_seq_num += 1
+                else :
+                    # Send the last acknowledgment packet again
+                    self.simulator.pass_to_network_layer(self.entity, 
+                                                         self.last_ack_pkt)
 
-        checksum = ~summed_words & 0xffff
-        return checksum
 
-    def make_ACKpkt(self, seq):
+    def timer_interrupt(self):
+        """ Implements the functionality that handles when a timeout occurs for the oldest unacknowledged packet
+        
+        This function will be called by the NetworkSimulator when a timeout occurs for the oldest unacknowledged packet 
+        (i.e. too much time as passed without receiving an acknowledgment for that packet). It should implement the 
+        appropriate functionality detailed in the GBN Sender FSM. 
 
-        format_string = '!HiHI'
-        message = pack(format_string, 0, seq, 0, 0)
-        checksum = self.compute_checksum(message)
-        message = pack(format_string, 0, seq, checksum, 0)
-        return message
+        You'll need to call self.simulator.start_timer() in this function. Make sure you pass self.entity as the first 
+        argument when calling this functions.
+        
+        Args:
+            None
+        Returns:
+            None        
+        """
+        
+        # Start the timer again
+        self.simulator.start_timer(self.entity, self.timer_interval)
+        
+        # Resend the unacknowledged packets within the window
+        for i in range(self.window_base, self.next_seq_num) :
+            self.simulator.pass_to_network_layer(self.entity, 
+                                                 self.unacked_buffer
+                                                 [i % self.window_size])
+        
+        
+    def create_data_pkt(self, seq_num, payload):
+        """ Create a data packet with a given sequence number and variable length payload
+        
+        Data packets contain the following fields:
+            packet_type (unsigned half): this should always be 0x0 for data packets
+            seq_num (unsigned int): this should contain the sequence number for this packet
+            checksum (unsigned half): this should contain the checksum for this packet
+            payload_length (unsigned int): this should contain the length of the payload
+            payload (varchar string): the payload contains a variable length string
+        
+        Note: generating a checksum requires a bytes object containing all of the packet's data except for the checksum 
+              itself. It is recommended to first pack the entire packet with a placeholder value for the checksum 
+              (i.e. 0), generate the checksum, and to then repack the packet with the correct checksum value.
+        
+        Args:
+            seq_num (int): the sequence number of this packet
+            payload (string): the variable length string that should be included in this packet
+        Returns:
+            bytes: a bytes object containing the required fields for a data packet
+        """
+        
+        # Create a dictionary or to store packet values
+        dictValues = {
+    		'packet_type': 0x0,
+   			'seq_num': seq_num,
+			'checksum': 0,
+			'payload_length': len(payload),
+			'payload': payload.encode()
+		}
+        
+        # Construct the format string for packing
+        stringData = f'!HIHI{dictValues["payload_length"]}s'
+        
+        # Convert dictionary values to a tuple
+        tupleVal = tuple(dictValues.values())
+        
+        # Pack the values into a binary packet
+        pckData = pack(stringData, *tupleVal)
+        
+        # Calculate and update the checksum in the dictionary
+        dictValues['checksum'] = self.create_checksum(pckData)
+        
+        # Update the tuple values with the new checksum
+        tupleVal = tuple(dictValues.values())
+        pckData = pack(stringData, *tupleVal)
+        
+        return pckData
+    
+    
+    def create_ack_pkt(self, seq_num):
+        """ Create an acknowledgment packet with a given sequence number
+        
+        Acknowledgment packets contain the following fields:
+            packet_type (unsigned half): this should always be 0x1 for ack packets
+            seq_num (unsigned int): this should contain the sequence number of the packet being acknowledged
+            checksum (unsigned half): this should contain the checksum for this packet
+        
+        Note: generating a checksum requires a bytes object containing all of the packet's data except for the checksum 
+              itself. It is recommended to first pack the entire packet with a placeholder value for the checksum 
+              (i.e. 0), generate the checksum, and to then repack the packet with the correct checksum value.
+        
+        Args:
+            seq_num (int): the sequence number of this packet
+            payload (string): the variable length string that should be included in this packet
+        Returns:
+            bytes: a bytes object containing the required fields for a data packet
+        """
+        
+        # Create a dictionary to store acknowledgment packet values
+        dictValues = {
+    		'packet_type': 0x1,
+   			'seq_num': seq_num,
+			'checksum': 0
+		}
+    
+        # Construct the format string for packing
+        stringData = f'!HIH'
+        
+        # Convert dictionary values to a tuple
+        tupleVal = tuple(dictValues.values())
+        
+        # Pack the values into a binary packet
+        pktACK = pack(stringData, *tupleVal)
+        
+        # Calculate and update the checksum in the dictionary
+        dictValues['checksum'] = self.create_checksum(pktACK)
+        
+        # Update the tuple values with the new checksum
+        tupleVal = tuple(dictValues.values())
+        pktACK = pack(stringData, *tupleVal)
+       
+        return pktACK
 
-    def make_DATApkt(self, seq, payload):
+    # This function should accept a bytes object and return a checksum for the bytes object. 
+    def create_checksum(self, packet):
+        """ Create an Internet checksum for a given bytes object
+        
+        This function should return a checksum generated using the Internet checksum algorithm. The value you compute 
+        should be able to be represented as an unsigned half (i.e. between 0 and 65536). In general, Python stores most
+        numbers as ints. You do *not* need to cast your computed checksum to an unsigned half when returning it. This 
+        will be done when packing the checksum.
+        
+        Args:
+            packet (bytes): the bytes object that the checksum will be based on
+        Returns:
+            int: the checksum value
+        """
+        
+        # Check if the packet length is odd and add an extra byte if needed
+        if len(packet) % 2 == 1 :
+            packet += bytes(1)
+            
+        # Iterate through the packet by 2-byte chunks and perform bitwise operations
+        wordArray = []
+        for i in range(0, len(packet), 2) :
+            wordArray.append(packet[i] << 8 | packet[i+1])
+            
+        # Calculate the checksum value
+        checksumVal = sum(wordArray)
+        checksumVal = (checksumVal & 0xffff) + (checksumVal >> 16)
+        checksumVal = ~checksumVal & 0xffff
+        
+        return checksumVal
+            
+    
+    def unpack_pkt(self, packet):
+        """ Create a dictionary containing the contents of a given packet
+        
+        This function should unpack a packet and return the values it contains as a dictionary. Valid dictionary keys 
+        include: "packet_type", "seq_num", "checksum", "payload_length", and "payload". Only include keys that have 
+        associated values (i.e. "payload_length" and "payload" are not needed for ack packets). The packet_type value 
+        should be either 0x0 or 0x1. It should not be represented a bool
+        
+        Note: unpacking a packet is generally straightforward, however it is complicated if the payload_length field is
+              corrupted. In this case, you may attempt to unpack a payload larger than the actual available data. This 
+              will result in a struct.error being raised with the message "unpack requires a buffer of ## bytes". THIS
+              IS EXPECTED BEHAVIOR WHEN PAYLOAD_LENGTH IS CORRUPTED. It indicates that the packet has been corrupted, 
+              not that you've done something wrong (unless you're getting this on tests that don't involve corruption).
+              If this occurs, treat this packet as a corrupted packet. 
+              
+              I recommend wrapping calls to unpack_pkt in a try... except... block that will catch the struct.error 
+              exception when it is raised. If this exception is raised, then treat the packet as if it is corrupted in 
+              the function calling unpack_pkt().
+        
+        Args:
+            packet (bytes): the bytes object containing the packet data
+        Returns:
+            dictionary: a dictionary containing the different values stored in the packet
+        """
+        
+        offVar = 0
+        pckData = {}
+        
+        # Unpack the packet header values using the format string
+        stringData = f'!HIH'
+        pckData['packet_type'], pckData['seq_num'], pckData['checksum'] = \
+        unpack(stringData, packet[offVar:offVar+calcsize(stringData)])
+        
+        offVar += calcsize(stringData)
+        
+        # Unpack the payload length and payload if the packet type is 0x0
+        if pckData['packet_type'] == 0x0:
+            
+            stringData = f'!I'
+            pckData['payload_length'] = \
+            unpack(stringData, packet[offVar:offVar+calcsize(stringData)])[0]
+            
+            offVar += calcsize(stringData)
+            
+            stringData = f'!{pckData["payload_length"]}s'
+            pckData['payload'] = unpack(stringData, 
+                                        packet[offVar:offVar+calcsize(stringData)])[0]
+            pckData['payload'] = pckData['payload'].decode()
+            
+        return pckData
+              
+              
+    # This function should check to determine if a given packet is corrupt. The packet parameter accepted
+    # by this function should contain a bytes object
+    def is_corrupt(self, packet):
+        """ Determine whether a packet has been corrupted based on the included checksum
 
-        format_string = '!HiHI' + str(len(payload.encode())) + 's' 
-        message = pack(format_string, 128, seq, 0, len(payload.encode()), payload.encode())
-        checksum = self.compute_checksum(message)
-        message = pack(format_string, 128, seq, checksum, len(payload.encode()), payload.encode())
-        return message
+        This function should use the included Internet checksum to determine whether this packet has been corrupted.        
+        
+        Args:
+            packet (bytes): a bytes object containing a packet's data
+        Returns:
+            bool: whether or not the packet data has been corrupted
+        """ 
+        
+        # Check if the checksum of the packet is equal to 0x0000 (not corrupt) 
+        return not (self.create_checksum(packet) == 0x0000)
+        
+    
+    
+    
+    
+    
+
+#@madebyJoelMiller
+#link to personal website with projects - www.summerwebdev2023.com
