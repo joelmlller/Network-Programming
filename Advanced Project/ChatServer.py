@@ -1,3 +1,11 @@
+# Name: Joel Miller        
+# Username: jmill53            
+# Email: jmill53@clemson.edu
+# Instructor: Dr. Andrew Robb       
+# CPSC 3600 Summer 23             
+# Project: Implementing a Distributed Server Network
+
+
 from ChatMessageParser import *
 from socket import *
 import os
@@ -88,6 +96,9 @@ class CRCServer(object):
 
         # TODO: Create your selector and store it in self.sel
         self.sel = None
+        self.sel = selectors.DefaultSelector()
+        
+      
 
 
         # The following four variables will be used to track information about the state of the network
@@ -187,10 +198,18 @@ class CRCServer(object):
         Returns:
             None        
         """        
-        self.print_info("Configuring the server socket...")
+        self.print_info("Configuring the server socket...")  # Log server configuration message
 
-        # TODO: Implement the above functionality
-        
+        # Create and configure server socket
+        self.serverSocket = socket(AF_INET, SOCK_STREAM)  # Create TCP/IP socket
+
+        self.serverSocket.bind(('', self.port))  # Bind the socket to a specific port
+
+        self.serverSocket.listen(5)  # Allow up to 5 queued connections
+
+        self.serverSocket.setblocking(False)  # Set the socket to non-blocking mode
+
+        self.sel.register(self.serverSocket, selectors.EVENT_READ)  # Register the socket for read events
 
 
     def connect_to_server(self):
@@ -214,10 +233,21 @@ class CRCServer(object):
         Returns:
             None        
         """
-        self.print_info("Connecting to remote server %s:%i..." % (self.connect_to_host, self.connect_to_port))
+        self.print_info("Connecting to remote server %s:%i..." % (self.connect_to_host, self.connect_to_port))  # Display connection message
 
-        # TODO: Implement the above functionality
+        # Create socket and initiate connection
+        self.remoteServer = socket(AF_INET, SOCK_STREAM)  # Create TCP socket
+        self.remoteServer.connect((self.connect_to_host_addr, self.connect_to_port))  # Connect to remote host
+        self.remoteServer.setblocking(False)  # Set non-blocking mode
 
+        sockData = BaseConnectionData()  # Create connection data object
+        sockData.write_buffer = b''  # Initialize write buffer
+        events = selectors.EVENT_READ | selectors.EVENT_WRITE  # Set selector events
+
+        regMSG = ServerRegistrationMessage.bytes(self.id, 0, self.server_name, self.server_info)  # Generate registration message
+        sockData.write_buffer += regMSG  # Add message to write buffer
+
+        self.sel.register(self.remoteServer, events, sockData)  # Register the socket
 
 
     def check_IO_devices_for_messages(self):
@@ -246,12 +276,18 @@ class CRCServer(object):
         Returns:
             None        
         """
-        self.print_info("Listening for new connections on port " + str(self.port))
-        
-        while not self.request_terminate:
-            # TODO: Implement the above functionality
-            pass    
+        self.print_info("Listening for new connections on port " + str(self.port))  # Start listening on port
+                
+        while not self.request_terminate:  # While termination not requested
+            if len(self.sel._fd_to_key) > 0:  # If registered sockets exist
+                eventType = self.sel.select(timeout=0.1)  # Select event with timeout
+                for x, event_mask in eventType:  # For each event in queue
+                    if x.data == None:  # If no data
+                        self.accept_new_connection(x)  # Accept new connection
+                    else:  # If data exists
+                        self.handle_io_device_events(x, event_mask)  # Handle IO events
 
+        self.cleanup()  # Cleanup resources
 
 
     def cleanup(self):
@@ -272,9 +308,20 @@ class CRCServer(object):
             None        
         """
         self.print_info("Cleaning up the server")
+        
+        # Extract a list of keys associated with registered sockets
+        keys = list(self.sel._fd_to_key.values())
+        
+        for x in keys:
+            serverSock = x.fileobj
+            serverSock.close()
+            self.sel.unregister(serverSock)
+        
         # TODO: Implement the above functionality
-        pass
-
+        
+        # Shutdown and close the socket
+        self.sel.close()
+        self.serverSocket.close()
 
 
     def accept_new_connection(self, io_device):
@@ -298,10 +345,31 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
+        try:
+        # Accept client's connection request
+            conRqst, servSocket = io_device.fileobj.accept()
+        except OSError as e:
+            print(f"Error accepting connection: {e}")
+            return
+
+    # Set the socket operation to non-blocking mode
+        conRqst.setblocking(False)
+
+    # Initialize connection data
+        data = BaseConnectionData()
+        data.write_buffer = b''
+
+    # Create an event mask for read and write events
+        eventType = selectors.EVENT_READ | selectors.EVENT_WRITE
+
+    # Register the client socket with the selector
+        try:
+            self.sel.register(conRqst, eventType, data)
+        except Exception as e:
+            print(f"Error registering new connection: {e}")
+            conRqst.close()
 
 
-   
     def handle_io_device_events(self, io_device, event_mask):
         """ This function is responsible for handling READ and WRITE events for a given IO device. Incomming  
         messages will be read and passed to the appropriate message handler here and the write buffer  
@@ -327,10 +395,22 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
+        sendMngr = io_device.fileobj  # Get the file object
+            
+        if event_mask & selectors.EVENT_READ:  # If readable event
+            pckData = sendMngr.recv(2048)  # Receive the data
+            if pckData:  # If data exists
+                self.handle_messages(io_device, pckData)  # Handle received messages
+            else:  # If no data
+                self.sel.unregister(sendMngr)  # Unregister the socket
+                sendMngr.close()  # Close the socket
+
+        if (event_mask & selectors.EVENT_WRITE):  # If writable event
+            if io_device.data.write_buffer:  # If buffer has data
+                sendMngr.send(io_device.data.write_buffer)  # Send data from buffer
+                io_device.data.write_buffer = b''  # Clear the buffer
 
 
-    
     def handle_messages(self, io_device, recv_data):
         """ This function is responsible for parsing the received bytes into separate messages and then 
         passing each of the received messages to the appropriate message handler. Message parsing is offloaded
@@ -351,8 +431,10 @@ class CRCServer(object):
         for message in messages:
              # If we recognize the command, then process it using the assigned message handler
             if message.message_type in self.message_handlers:
-                self.print_info("Received msg from Host ID #%s \"%s\"" % (message.source_id, message.bytes))
-                self.message_handlers[message.message_type](io_device, message)
+                self.print_info("Received msg from Host ID #%s \"%s\"" % (message.source_id, 
+                                                                          message.bytes))
+                self.message_handlers[message.message_type](io_device, 
+                                                            message)
             else:
                 raise Exception("Unrecognized command: " + message)
 
@@ -374,8 +456,7 @@ class CRCServer(object):
         if destination_id in self.hosts_db:
             self.print_info("Sending message to Host ID #%s \"%s\"" % (destination_id, message))
             # TODO: Implement the above functionality
-            pass
-
+            self.hosts_db[self.hosts_db[destination_id].first_link_id].write_buffer += message
 
 
     def broadcast_message_to_servers(self, message, ignore_host_id=None):
@@ -401,8 +482,9 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
-
+        for id in self.adjacent_server_ids:
+            if id != ignore_host_id:
+                self.send_message_to_host(id, message)
 
 
     def broadcast_message_to_adjacent_clients(self, message, ignore_host_id=None):
@@ -423,8 +505,9 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
-
+        for id in self.adjacent_user_ids:
+            if id != ignore_host_id:
+                self.send_message_to_host(id, message)
 
 
     def send_message_to_unknown_io_device(self, io_device, message):
@@ -447,7 +530,7 @@ class CRCServer(object):
         """
         self.print_info("Sending message to an unknown IO device \"%s\"" % (message))
         # TODO: Implement the above functionality
-        pass
+        io_device.data.write_buffer += message
 
 ##############################################################################################################
 
@@ -492,7 +575,73 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the functionality described above
-        pass
+       
+        # Check source ID in database
+        if message.source_id in self.hosts_db: 
+            # Generate a status update message   
+            updateMessage = StatusUpdateMessage.bytes(self.id, 0, 0x02, 
+            "A machine has already registered with ID " + str(message.source_id))
+            
+            # Add update message to buffer
+            io_device.data.write_buffer += updateMessage
+            return
+        
+        # Create new ServerConnectionData instanc
+        connData = ServerConnectionData(message.source_id, 
+                                        message.server_name, 
+                                        message.server_info)
+        
+        # Set first link ID
+        connData.first_link_id = message.last_hop_id
+
+        # Check if self ID
+        if message.last_hop_id == self.id or message.last_hop_id == 0:
+            connData.first_link_id = message.source_id
+            self.sel.modify(io_device.fileobj, 
+                            selectors.EVENT_READ | selectors.EVENT_WRITE, 
+                            connData)
+            
+        # Check for no previous hop
+        if message.last_hop_id == 0:
+            statusMessage = ServerRegistrationMessage.bytes(self.id, 
+                                                            message.source_id, 
+                                                            self.server_name, 
+                                                            self.server_info)
+            # Add message to buffer
+            connData.write_buffer += statusMessage
+            
+            # Loop over all connections
+            for dictData in self.hosts_db.values():
+                # Check if client connection
+                if isinstance(dictData, ClientConnectionData):
+                    clientMsg = ClientRegistrationMessage.bytes(dictData.id, 
+                                                                self.id, 
+                                                                dictData.client_name, 
+                                                                dictData.client_info)
+                     # Add message to buffer
+                    connData.write_buffer += clientMsg
+                # Check if server connection
+                elif isinstance(dictData, ServerConnectionData):
+                    serverMsg = ServerRegistrationMessage.bytes(dictData.id, 
+                                                                self.id, 
+                                                                dictData.server_name, 
+                                                                dictData.server_info)
+                    # Add message to buffer
+                    connData.write_buffer += serverMsg
+                
+        # Generate new server registration message
+        self.hosts_db[message.source_id] = connData
+        newServerMsg = ServerRegistrationMessage.bytes(message.source_id, 
+                                                       self.id, 
+                                                       message.server_name, 
+                                                       message.server_info)
+        # Broadcast message to all servers
+        self.broadcast_message_to_servers(newServerMsg, 
+                                          ignore_host_id = message.last_hop_id)
+        # Check for adjacent servers
+        if message.last_hop_id == self.id or message.last_hop_id == 0:
+            # Append to adjacent server IDs
+            self.adjacent_server_ids.append(message.source_id)
 
 ##############################################################################################################
 
@@ -539,7 +688,61 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
+        
+        # if source ID of message is in hosts database
+        if message.source_id in self.hosts_db:
+            
+             # Generate a status update message indicating the ID is already registered
+            updateMessage = StatusUpdateMessage.bytes(self.id, 0, 0x02, \
+            "Someone has already registered with ID " + str(message.source_id))
+            
+            # Append the status update message to the device's write buffer for sending
+            io_device.data.write_buffer += updateMessage
+            # Exit the function
+            return
+        
+        # Create a new connection data object for the client
+        connData = ClientConnectionData(message.source_id, 
+                                        message.client_name, 
+                                        message.client_info)
+        
+        # Set the first link ID to the last hop ID from the message
+        connData.first_link_id = message.last_hop_id
+
+        # if the last hop ID is the server itself or 0
+        if message.last_hop_id == self.id or message.last_hop_id == 0:
+            connData.first_link_id = message.source_id
+            self.sel.modify(io_device.fileobj, selectors.EVENT_READ | selectors.EVENT_WRITE, connData)
+
+        # Generate a welcome message
+        if message.last_hop_id == 0:
+            statusMessage = StatusUpdateMessage.bytes(self.id, message.source_id, 0x00, \
+            "Welcome to the Clemson Relay Chat network " + str(connData.client_name))
+            
+                # Add the welcome message to the write buffer
+            connData.write_buffer += statusMessage
+            for connected in self.hosts_db.values():
+                if isinstance(connected, ClientConnectionData):
+                    clientMsg = ClientRegistrationMessage.bytes(connected.id, self.id,
+                                                                connected.client_name, 
+                                                                connected.client_info)
+                    # Add the welcome message to the write buffer
+                    connData.write_buffer += clientMsg
+
+        self.hosts_db[message.source_id] = connData
+        # Generate a new server registration message
+        newServerMsg = ClientRegistrationMessage.bytes(message.source_id, self.id, 
+                                                       message.client_name, 
+                                                       message.client_info)
+        # Broadcast the server registration message to all servers and adjacent clients, except the last hop
+        self.broadcast_message_to_servers(newServerMsg, 
+                                          ignore_host_id = message.last_hop_id)
+        self.broadcast_message_to_adjacent_clients(newServerMsg, 
+                                                   ignore_host_id = message.last_hop_id)
+
+        # If the last hop ID is the server itself or 0, add the source ID to the list of adjacent user IDs
+        if message.last_hop_id == self.id or message.last_hop_id == 0:
+            self.adjacent_user_ids.append(message.source_id)
 
 ##############################################################################################################
 
@@ -560,7 +763,17 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
+        
+        # Check if the destination ID of message is 0 or same as server's ID
+        if message.destination_id == 0 or message.destination_id == self.id:
+            # If true, add message to the server's status updates log
+            self.status_updates_log.append(message.content)
+            
+        # If the destination ID is present in the hosts database
+        elif message.destination_id in self.hosts_db:
+            # Send the message to the corresponding host
+            self.send_message_to_host(message.destination_id, message.bytes)
+            
 
 ##############################################################################################################
 
@@ -581,7 +794,15 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
+        
+        # Check if the destination ID of the message is in the hosts database
+        if message.destination_id in self.hosts_db:
+            # If destination is known, send the message to the destination host
+            self.send_message_to_host(message.destination_id, message.bytes)
+        else:
+            # Add the status update message to the device's write buffer for outgoing messages
+            io_device.data.write_buffer += StatusUpdateMessage.bytes\
+            (self.id, 0, 0x01, "Unknown ID " + str(message.destination_id))
 
 ##############################################################################################################
 
@@ -602,8 +823,24 @@ class CRCServer(object):
             None        
         """
         # TODO: Implement the above functionality
-        pass
-    
+        
+        # Check if the source ID of the message is already in the hosts database
+        if message.source_id in self.hosts_db:  
+            # Broadcast the received message to all the servers, except the one that sent the message
+            self.broadcast_message_to_servers(message.bytes, message.source_id)
+
+            # Broadcast the received message to all adjacent clients, except the one that sent the message
+            self.broadcast_message_to_adjacent_clients(message.bytes, message.source_id)
+
+            # If the source ID exists, remove it from the database            
+            self.hosts_db.pop(message.source_id)
+
+             # Check if the source ID of the message is in the list of adjacent user IDs
+            if message.source_id in self.adjacent_user_ids:
+                # If the source ID exists, remove it from the list
+                self.adjacent_user_ids.remove(message.source_id)
+
+           
 ##############################################################################################################    
     
 
